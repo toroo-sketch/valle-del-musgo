@@ -1,6 +1,6 @@
 // Servidor de "Valle del Musgo"
 // Node.js puro: sin dependencias, no hace falta npm install.
-// - Cuentas con correo y contraseña (guardadas cifradas con scrypt en data/cuentas.json)
+// - Cuentas con correo y contraseña (guardadas cifradas con scrypt en data/db.cuentas.json)
 // - Salas públicas y privadas con código
 // - Multijugador en tiempo real por WebSocket (implementado acá mismo, sin librerías)
 // - Sirve el juego desde la carpeta public/
@@ -19,27 +19,56 @@ const MAX_PER_ROOM = 20;
 const TICK_MS = 100;           // 10 actualizaciones por segundo
 const SESSION_DAYS = 30;
 
-// ---------- Guardado en JSON ----------
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+// ---------- Guardado ----------
+// Sin DATABASE_URL: archivos JSON en data/ (para probar en tu PC).
+// Con DATABASE_URL (Neon, Postgres gratis): todo queda guardado aunque Render reinicie.
+const DATABASE_URL = process.env.DATABASE_URL || '';
+if (!DATABASE_URL && !fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+const db = { cuentas: {}, sesiones: {}, salas: {}, cofres: {} };
+let pool = null;
+const pendingWrites = new Map();
 function readJSON(name, fallback) {
   try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR, name), 'utf8')); }
   catch (_) { return fallback; }
 }
-const pendingWrites = new Map();
-function saveJSON(name, data) {
-  clearTimeout(pendingWrites.get(name));
-  pendingWrites.set(name, setTimeout(() => {
-    const file = path.join(DATA_DIR, name), tmp = file + '.tmp';
-    fs.writeFile(tmp, JSON.stringify(data, null, 2), err => {
-      if (err) return console.error('No se pudo guardar', name, err.message);
-      fs.rename(tmp, file, e => { if (e) console.error('No se pudo guardar', name, e.message); });
+function writeFileSoon(tipo) {
+  clearTimeout(pendingWrites.get(tipo));
+  pendingWrites.set(tipo, setTimeout(() => {
+    const file = path.join(DATA_DIR, tipo + '.json'), tmp = file + '.tmp';
+    fs.writeFile(tmp, JSON.stringify(db[tipo], null, 2), err => {
+      if (err) return console.error('No se pudo guardar', tipo, err.message);
+      fs.rename(tmp, file, e => { if (e) console.error('No se pudo guardar', tipo, e.message); });
     });
   }, 300));
 }
-const cuentas = readJSON('cuentas.json', {});
-const sesiones = readJSON('sesiones.json', {});
-const salas = readJSON('salas.json', {});
-if (!salas.PUBLICA) { salas.PUBLICA = { publica: true, seed: 1 + Math.floor(Math.random() * 99999), creada: Date.now() }; saveJSON('salas.json', salas); }
+// guarda (o borra) una sola entrada
+function put(tipo, clave) {
+  if (!pool) return writeFileSoon(tipo);
+  const k = tipo + '\u0000' + clave;
+  clearTimeout(pendingWrites.get(k));
+  pendingWrites.set(k, setTimeout(async () => {
+    pendingWrites.delete(k);
+    const valor = db[tipo][clave];
+    try {
+      if (valor === undefined) await pool.query('DELETE FROM datos WHERE tipo=$1 AND clave=$2', [tipo, clave]);
+      else await pool.query('INSERT INTO datos (tipo, clave, valor) VALUES ($1,$2,$3) ON CONFLICT (tipo, clave) DO UPDATE SET valor=EXCLUDED.valor', [tipo, clave, JSON.stringify(valor)]);
+    } catch (e) { console.error('No se pudo guardar en la base de datos', tipo, e.message); }
+  }, 250));
+}
+async function initStore() {
+  if (DATABASE_URL) {
+    const { Pool } = require('pg');
+    pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false }, max: 5 });
+    await pool.query('CREATE TABLE IF NOT EXISTS datos (tipo text NOT NULL, clave text NOT NULL, valor jsonb NOT NULL, PRIMARY KEY (tipo, clave))');
+    const r = await pool.query('SELECT tipo, clave, valor FROM datos');
+    for (const row of r.rows) if (db[row.tipo]) db[row.tipo][row.clave] = row.valor;
+    console.log(' Base de datos conectada: ' + r.rows.length + ' registros');
+  } else {
+    for (const t of Object.keys(db)) db[t] = readJSON(t + '.json', {});
+    console.log(' Guardando en archivos JSON (carpeta data/)');
+  }
+  if (!db.salas.PUBLICA) { db.salas.PUBLICA = { publica: true, seed: 1 + Math.floor(Math.random() * 99999), creada: Date.now() }; put('salas', 'PUBLICA'); }
+}
 
 // ---------- Utilidades ----------
 const validEmail = e => typeof e === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e) && e.length <= 120;
@@ -49,22 +78,22 @@ function samePass(pass, salt, hash) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 const ROOM_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-function newRoomCode() { let c; do { c = ''; for (let i = 0; i < 6; i++) c += ROOM_CHARS[crypto.randomInt(ROOM_CHARS.length)]; } while (salas[c]); return c; }
+function newRoomCode() { let c; do { c = ''; for (let i = 0; i < 6; i++) c += ROOM_CHARS[crypto.randomInt(ROOM_CHARS.length)]; } while (db.salas[c]); return c; }
 // mismo cálculo que el juego, así el código siempre da el mismo mapa
 function seedFromCode(code) { let h = 2166136261; for (const ch of code) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) % 99999 + 1; }
 function clean(s, max) { return String(s || '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, max); }
 
 function newSession(email) {
   const token = crypto.randomBytes(32).toString('hex');
-  sesiones[token] = { email, vence: Date.now() + SESSION_DAYS * 864e5 };
-  saveJSON('sesiones.json', sesiones);
+  db.sesiones[token] = { email, vence: Date.now() + SESSION_DAYS * 864e5 };
+  put('sesiones', token);
   return token;
 }
 function userFromToken(token) {
-  const s = token && sesiones[token];
+  const s = token && db.sesiones[token];
   if (!s) return null;
-  if (s.vence < Date.now()) { delete sesiones[token]; saveJSON('sesiones.json', sesiones); return null; }
-  const c = cuentas[s.email];
+  if (s.vence < Date.now()) { delete db.sesiones[token]; put('sesiones', token); return null; }
+  const c = db.cuentas[s.email];
   return c ? { email: s.email, ...c } : null;
 }
 const perfil = (email, c, token) => ({ email, nombre: c.nombre, salas: c.salas || [], token });
@@ -108,19 +137,19 @@ const server = http.createServer(async (req, res) => {
         if (!validEmail(email)) return send(res, 400, { error: 'Escribí un correo válido.' });
         if (pass.length < 6 || pass.length > 100) return send(res, 400, { error: 'La contraseña tiene que tener entre 6 y 100 caracteres.' });
         if (nombre.length < 2) return send(res, 400, { error: 'Tu nombre de jugador tiene que tener al menos 2 letras.' });
-        if (cuentas[email]) return send(res, 409, { error: 'Ya existe una cuenta con ese correo. Iniciá sesión.' });
-        if (Object.values(cuentas).some(c => c.nombre.toLowerCase() === nombre.toLowerCase())) return send(res, 409, { error: 'Ese nombre de jugador ya está en uso.' });
+        if (db.cuentas[email]) return send(res, 409, { error: 'Ya existe una cuenta con ese correo. Iniciá sesión.' });
+        if (Object.values(db.cuentas).some(c => c.nombre.toLowerCase() === nombre.toLowerCase())) return send(res, 409, { error: 'Ese nombre de jugador ya está en uso.' });
         const salt = crypto.randomBytes(16).toString('hex');
-        cuentas[email] = { nombre, salt, hash: hashPass(pass, salt), creada: Date.now(), salas: [] };
-        saveJSON('cuentas.json', cuentas);
+        db.cuentas[email] = { nombre, salt, hash: hashPass(pass, salt), creada: Date.now(), salas: [] };
+        put('cuentas', email);
         console.log('Cuenta nueva:', nombre);
-        return send(res, 200, perfil(email, cuentas[email], newSession(email)));
+        return send(res, 200, perfil(email, db.cuentas[email], newSession(email)));
       }
       if (req.method === 'POST' && url.pathname === '/api/login') {
         if (tooMany(ip)) return send(res, 429, { error: 'Demasiados intentos. Esperá unos minutos.' });
         const b = await readBody(req);
         const email = String(b.email || '').trim().toLowerCase(), pass = String(b.password || '');
-        const c = cuentas[email];
+        const c = db.cuentas[email];
         if (!c || !samePass(pass, c.salt, c.hash)) return send(res, 401, { error: 'El correo o la contraseña no son correctos.' });
         return send(res, 200, perfil(email, c, newSession(email)));
       }
@@ -130,23 +159,36 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, perfil(u.email, u, token));
       }
       if (req.method === 'POST' && url.pathname === '/api/salir') {
-        if (sesiones[token]) { delete sesiones[token]; saveJSON('sesiones.json', sesiones); }
+        if (db.sesiones[token]) { delete db.sesiones[token]; put('sesiones', token); }
         return send(res, 200, { ok: true });
       }
       if (req.method === 'POST' && url.pathname === '/api/salas') {
         const u = userFromToken(token);
         if (!u) return send(res, 401, { error: 'Tu sesión venció. Volvé a entrar.' });
         const codigo = newRoomCode();
-        salas[codigo] = { duenio: u.email, seed: seedFromCode(codigo), creada: Date.now() };
-        saveJSON('salas.json', salas);
+        db.salas[codigo] = { duenio: u.email, seed: seedFromCode(codigo), creada: Date.now() };
+        put('salas', codigo);
         rememberRoom(u.email, codigo);
-        return send(res, 200, { codigo, seed: salas[codigo].seed, jugadores: 0 });
+        return send(res, 200, { codigo, seed: db.salas[codigo].seed, jugadores: 0 });
+      }
+      if (url.pathname === '/api/cofre') {
+        const u = userFromToken(token);
+        if (!u) return send(res, 401, { error: 'Tu sesión venció. Volvé a entrar.' });
+        if (req.method === 'GET') return send(res, 200, { cofre: db.cofres[u.email] || null });
+        if (req.method === 'PUT') {
+          const b = await readBody(req), c = b.cofre || {};
+          const n = (v, max) => Math.max(0, Math.min(max, Math.floor(Number(v) || 0)));
+          const items = Array.isArray(c.items) ? c.items.filter(x => typeof x === 'string' && /^[a-z]{2,8}$/.test(x)).slice(0, 60) : [];
+          db.cofres[u.email] = { wood: n(c.wood, 1e6), stone: n(c.stone, 1e6), ore: n(c.ore, 1e6), weapon: n(c.weapon, 3), armor: n(c.armor, 3), items, guardado: Date.now() };
+          put('cofres', u.email);
+          return send(res, 200, { ok: true });
+        }
       }
       const m = url.pathname.match(/^\/api\/salas\/([A-Z0-9]{6,7})$/);
       if (req.method === 'GET' && m) {
         const u = userFromToken(token);
         if (!u) return send(res, 401, { error: 'Tu sesión venció. Volvé a entrar.' });
-        const s = salas[m[1]];
+        const s = db.salas[m[1]];
         if (!s) return send(res, 404, { error: 'No existe ninguna sala con ese código.' });
         if (!s.publica) rememberRoom(u.email, m[1]);
         return send(res, 200, { codigo: m[1], seed: s.seed, jugadores: (rooms.get(m[1]) || new Map()).size });
@@ -169,9 +211,9 @@ const server = http.createServer(async (req, res) => {
   });
 });
 function rememberRoom(email, code) {
-  const c = cuentas[email]; if (!c) return;
+  const c = db.cuentas[email]; if (!c) return;
   c.salas = [code, ...(c.salas || []).filter(x => x !== code)].slice(0, 5);
-  saveJSON('cuentas.json', cuentas);
+  put('cuentas', email);
 }
 
 // ---------- WebSocket (sin librerías) ----------
@@ -219,7 +261,7 @@ server.on('upgrade', (req, socket) => {
   const user = userFromToken(url.searchParams.get('token'));
   if (!user) return reject(401, 'Unauthorized');
   const code = (url.searchParams.get('sala') || '').toUpperCase();
-  if (!salas[code]) return reject(404, 'Not Found');
+  if (!db.salas[code]) return reject(404, 'Not Found');
   const room = rooms.get(code) || new Map();
   if (room.size >= MAX_PER_ROOM) return reject(403, 'Forbidden');
   const accept = crypto.createHash('sha1').update(req.headers['sec-websocket-key'] + WS_GUID).digest('base64');
@@ -232,7 +274,7 @@ server.on('upgrade', (req, socket) => {
   const cl = { id: nextId++, socket, email: user.email, nombre: user.nombre, room: code, buf: Buffer.alloc(0), open: true, last: Date.now(), st: null };
   clients.add(cl); room.set(cl.id, cl); rooms.set(code, room);
   console.log(`${cl.nombre} entró a la sala ${code} (${room.size} jugadores)`);
-  wsSend(cl, { t: 'hola', id: cl.id, sala: code, seed: salas[code].seed });
+  wsSend(cl, { t: 'hola', id: cl.id, sala: code, seed: db.salas[code].seed });
   broadcast(code, { t: 'entra', id: cl.id, nombre: cl.nombre }, cl);
   socket.on('data', c => wsParse(cl, c));
   socket.on('close', () => closeClient(cl));
@@ -292,10 +334,10 @@ setInterval(() => {
   }
 }, 20e3);
 
-server.listen(PORT, () => {
+initStore().then(() => server.listen(PORT, () => {
   console.log('-----------------------------------------');
   console.log(' Valle del Musgo · servidor encendido');
   console.log(' Abrí en el navegador: http://localhost:' + PORT);
-  console.log(' Cuentas registradas: ' + Object.keys(cuentas).length);
+  console.log(' Cuentas registradas: ' + Object.keys(db.cuentas).length);
   console.log('-----------------------------------------');
-});
+})).catch(e => { console.error('No se pudo iniciar el guardado:', e.message); process.exit(1); });

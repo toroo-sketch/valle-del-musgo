@@ -8,7 +8,7 @@ Este servidor hace tres cosas:
 
 Además sirve el juego: abrís la dirección del servidor en el navegador y ya estás jugando.
 
-Está hecho con **Node.js puro, sin dependencias**, igual que el verificador de cargas. No hace falta `npm install`, ni Python, ni herramientas de compilación.
+Está hecho con **Node.js puro**, igual que el verificador de cargas. En tu PC no hace falta `npm install`: guarda todo en archivos JSON. En internet usa la base de datos gratis de Neon (Render instala solo lo necesario).
 
 ---
 
@@ -18,7 +18,8 @@ Está hecho con **Node.js puro, sin dependencias**, igual que el verificador de 
 |---|---|
 | `server.js` | El servidor completo |
 | `public/index.html` | El juego |
-| `data/` | Se crea sola. Guarda `cuentas.json`, `sesiones.json` y `salas.json` |
+| `data/` | En tu PC (sin base de datos) guarda cuentas, salas y cofres en archivos JSON |
+| `render.yaml` | Configuración para publicar en Render con un clic |
 | `package.json` | Para que Render sepa cómo arrancarlo |
 
 ---
@@ -50,29 +51,29 @@ Para apagar el servidor: en la terminal apretá `Ctrl + C`.
 
 ---
 
-## 2. Publicarlo en internet con Render (recomendado)
+## 2. Publicarlo en internet (Render + Neon, gratis)
 
-Así cualquiera juega desde su casa con una dirección del tipo `https://valle-del-musgo.onrender.com`.
+Así tus amigos entran desde su casa a una dirección del tipo `https://valle-del-musgo.onrender.com`, crean su cuenta y juegan con vos. Las cuentas y los cofres se guardan en una base de datos gratis (Neon), así que **no se borran nunca**, aunque Render se duerma o se reinicie.
 
-1. **Subí la carpeta a GitHub**
-   - Entrá a github.com → **New repository** → nombre: `valle-del-musgo` → **Create**.
-   - Tocá **uploading an existing file** y arrastrá **todo lo que hay dentro** de la carpeta (`server.js`, `package.json`, `README.md`, `.gitignore`, la carpeta `public`). La carpeta `data` no hace falta.
-   - **Commit changes**.
-2. **Creá el servicio en Render**
-   - Entrá a render.com con tu cuenta de GitHub → **New +** → **Web Service** → elegí el repositorio `valle-del-musgo`.
-   - Completá así:
-     - **Runtime:** Node
-     - **Build Command:** dejalo vacío, o poné `echo listo`
-     - **Start Command:** `node server.js`
-     - **Instance Type:** Free
-   - **Create Web Service**. En 1 o 2 minutos aparece **Live** y la dirección pública.
-3. Abrí esa dirección y jugá. Las salas, el chat y el PvP funcionan igual que en tu PC (Render soporta WebSocket).
+### A. Base de datos (Neon)
+1. Entrá a **neon.tech** → **Sign up** (podés usar tu cuenta de Google).
+2. Creá un proyecto: nombre `valle-del-musgo`, región la más cercana (por ejemplo São Paulo).
+3. En **Connection string** copiá la dirección que empieza con `postgresql://...`. Es tu clave: no la compartas con nadie.
 
-### Importante sobre el plan gratis de Render
+### B. Servidor (Render)
+1. Entrá a **render.com** con tu cuenta de GitHub.
+2. **New +** → **Blueprint** → elegí el repositorio `valle-del-musgo`.
+3. Te va a pedir **DATABASE_URL**: pegá la dirección de Neon.
+4. **Apply**. En 2–3 minutos aparece **Live** con la dirección pública.
+5. Abrila: arriba de la pantalla de inicio tiene que decir **"Modo online"**. Pasale esa dirección a tus amigos.
 
-- **Se duerme** después de 15 minutos sin uso. La primera visita tarda unos 30 a 50 segundos en despertarlo.
-- **No guarda archivos para siempre.** Cuando Render reinicia o volvés a publicar, se borran `data/cuentas.json` y las salas, y hay que crear las cuentas de nuevo.
-- **Para que no se borren:** en Render agregá un **Disk** (es pago, unos pocos dólares por mes), montalo en `/var/data` y en **Environment** agregá la variable `DATA_DIR` con el valor `/var/data`.
+### Qué queda guardado en cada cuenta
+- Correo, nombre de jugador y contraseña (cifrada).
+- Las salas privadas que usaste.
+- **El cofre del pueblo**: materiales, arma, armadura y amuletos que guardes ahí quedan en tu cuenta hasta que los saques.
+
+### Plan gratis de Render
+Se duerme después de 15 minutos sin jugadores. La primera persona que entra espera unos 30–50 segundos a que despierte. Los datos no se pierden porque están en Neon.
 
 ### Probar rápido sin Render (ngrok)
 

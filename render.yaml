@@ -3,6 +3,9 @@ services:
     name: valle-del-musgo
     runtime: node
     plan: free
-    buildCommand: echo listo
+    buildCommand: npm install
     startCommand: node server.js
     healthCheckPath: /api/estado
+    envVars:
+      - key: DATABASE_URL
+        sync: false

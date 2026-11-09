@@ -390,7 +390,7 @@ button.danger{border-color:var(--danger);color:var(--danger)}
 
 <div class="modal panel" id="chest" role="dialog" aria-label="Cofre" hidden>
   <header>
-    <div><h2>Tu cofre</h2><p>Lo que guardás acá no se pierde cuando te eliminan.</p></div>
+    <div><h2>Tu cofre</h2><p>Lo que guardás acá queda en tu cuenta: no se pierde si te eliminan ni cuando salís del juego.</p></div>
     <button data-close="chest">Cerrar</button>
   </header>
   <div id="chestBody"></div>
@@ -2239,7 +2239,7 @@ function crow(iconHtml,title,sub,nums,btns){
   const t=document.createElement('div');t.textContent=title;if(sub){const s=document.createElement('small');s.textContent=sub;t.appendChild(s);}w.appendChild(t);
   const n=document.createElement('div');n.className='nums';n.textContent=nums||'';
   const b=document.createElement('div');b.className='btns';
-  for(const [label,fn,dis] of btns){const x=document.createElement('button');x.textContent=label;x.disabled=!!dis;x.addEventListener('click',()=>{if(!nearChest())return;fn();updateInvUI();});b.appendChild(x);}
+  for(const [label,fn,dis] of btns){const x=document.createElement('button');x.textContent=label;x.disabled=!!dis;x.addEventListener('click',()=>{if(!nearChest())return;fn();updateInvUI();saveChest();});b.appendChild(x);}
   r.append(w,n,b);return r;
 }
 function renderChest(){
@@ -4318,7 +4318,7 @@ function renderStart(){
     for(const [id,lab] of [['login','Iniciar sesión'],['register','Crear cuenta']]){const b=el('button',null,lab);b.setAttribute('aria-pressed',String(startTab===id));b.addEventListener('click',()=>{startTab=id;startMsg='';renderStart();});tabs.appendChild(b);}
     startBody.appendChild(tabs);
     const form=el('form','start-form');form.noValidate=true;
-    const [fe,ie]=field('stEmail','Correo','email','tucorreo@gmail.com',lsGet('valle-ultimo-correo'));
+    const [fe,ie]=field('stEmail','Correo (Gmail)','email','tucorreo@gmail.com',lsGet('valle-ultimo-correo'));
     const [fp2,ip]=field('stPass',startTab==='login'?'Contraseña del juego':'Contraseña nueva para el juego','password','Mínimo 6 caracteres');
     form.append(fe,fp2);
     let iname=null;
@@ -4435,6 +4435,28 @@ async function bootStart(){
   document.getElementById('chat').hidden=!online;
 }
 
+// cofre del pueblo guardado en la cuenta
+let chestSaveT=null;
+const chestKey=()=>'valle-cofre-'+(account?account.email:'');
+async function loadChest(){
+  if(!account)return;
+  let c=null;
+  if(online){try{c=(await api('GET','/api/cofre')).cofre;}catch(_){}}
+  else{try{c=JSON.parse(localStorage.getItem(chestKey())||'null');}catch(_){}}
+  if(!c)return;
+  chest.wood=c.wood||0;chest.stone=c.stone||0;chest.ore=c.ore||0;chest.weapon=c.weapon||0;chest.armor=c.armor||0;chest.items=(c.items||[]).filter(i=>ITEMS[i]);
+  renderChest();
+}
+function saveChest(){
+  if(!account)return;
+  clearTimeout(chestSaveT);
+  chestSaveT=setTimeout(()=>{
+    const c={wood:chest.wood,stone:chest.stone,ore:chest.ore,weapon:chest.weapon,armor:chest.armor,items:chest.items};
+    if(online)api('PUT','/api/cofre',{cofre:c}).catch(()=>banner('No se pudo guardar el cofre','info','Revisá la conexión'));
+    else{try{localStorage.setItem(chestKey(),JSON.stringify(c));}catch(_){}}
+  },400);
+}
+
 // ================= Multijugador =================
 let ws=null,myId=null,wantRoom=null,reconnectT=0,netSendT=0,lastHitBy=null;
 const remotes=new Map();
@@ -4530,7 +4552,7 @@ function generate(){
     if(building){building=null;buildBar.hidden=true;}document.getElementById('fruitRow').hidden=true;choppedTrees.length=0;lockTarget=null;
     for(const p of projectiles){fxGroup.remove(p.s);p.s.material.dispose();}projectiles.length=0;
     inv.wood=inv.stone=inv.ore=0;gear.weapon=gear.armor=0;items=[null,null,null,null];
-    chest.wood=chest.stone=chest.ore=chest.weapon=chest.armor=0;chest.items=[];
+    chest.wood=chest.stone=chest.ore=chest.weapon=chest.armor=0;chest.items=[];loadChest();
     kitBought=false;farmClosed=false;clan=null;bossKills=0;
     buildWorld();
     buildDungeons();buildCaves();
