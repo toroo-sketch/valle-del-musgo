@@ -1,0 +1,13 @@
+{
+  "name": "valle-del-musgo-servidor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Servidor del juego Valle del Musgo: cuentas, salas y multijugador en tiempo real. Sin dependencias.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
