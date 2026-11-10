@@ -3,6 +3,7 @@ services:
     name: valle-del-musgo
     runtime: node
     plan: free
+    region: virginia
     buildCommand: npm install
     startCommand: node server.js
     healthCheckPath: /api/estado
