@@ -1,0 +1,43 @@
+{
+  "rules": {
+    "jugadores": {
+      "$uid": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+    "cofres": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+    "salas": {
+      "$code": {
+        "info": {
+          ".read": "auth != null",
+          ".write": "auth != null && !data.exists()"
+        },
+        "presencia": {
+          ".read": "auth != null",
+          "$uid": { ".write": "auth != null && auth.uid === $uid" }
+        },
+        "eventos": {
+          ".read": "auth != null",
+          ".indexOn": ["ts"],
+          "$e": {
+            ".write": "auth != null && (data.exists() ? !newData.exists() : newData.child('id').val() === auth.uid)"
+          }
+        },
+        "golpes": {
+          "$uid": {
+            ".read": "auth != null && auth.uid === $uid",
+            "$g": {
+              ".write": "auth != null && (data.exists() ? auth.uid === $uid && !newData.exists() : newData.child('de').val() === auth.uid)"
+            }
+          }
+        }
+      }
+    }
+  }
+}

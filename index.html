@@ -178,6 +178,9 @@ button:disabled{opacity:.45;cursor:not-allowed;border-color:var(--line);color:va
 .net-pill{justify-self:center;font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;padding:4px 10px;border:1px solid var(--line)}
 .net-pill.on{color:var(--safe);border-color:#3e6a32}
 .net-pill.off{color:var(--muted)}
+.google{display:flex;align-items:center;justify-content:center;gap:10px;padding:11px 14px;font-size:15px;background:#ebe6cf;color:#1a1d12;border-color:#ebe6cf}
+.google:hover{background:#fff;color:#1a1d12;border-color:#fff}
+.or{text-align:center;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
 #start{position:fixed;inset:0;z-index:10;display:grid;place-items:center;overflow:auto;padding:24px max(16px,env(safe-area-inset-right,0px)) 24px max(16px,env(safe-area-inset-left,0px));background:radial-gradient(ellipse at 50% 20%,#1d3020 0%,#0c110b 70%)}
 .start-card{width:min(520px,100%);padding:22px 20px;display:grid;gap:14px;background:rgba(13,19,12,.94);border-color:#7a6a3a}
 .start-card h1{margin:0;font-family:var(--display);font-weight:400;font-size:34px;letter-spacing:.04em;color:var(--gold);text-align:center;text-wrap:balance}
@@ -428,6 +431,20 @@ button.danger{border-color:var(--danger);color:var(--danger)}
 
 <div id="loading"><div>Generando el valle<small id="loadSeed"></small></div></div>
 
+<script>
+// ===== Configuración de Firebase =====
+// Pegá acá los datos de tu proyecto (Firebase → Configuración del proyecto → Tus apps → Web).
+window.VALLE_FIREBASE={
+  apiKey:"PEGAR_AQUI",
+  authDomain:"",
+  databaseURL:"",
+  projectId:"",
+  appId:""
+};
+</script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 (() => {
@@ -4276,11 +4293,13 @@ document.getElementById('clsClose').addEventListener('click',()=>{if(!clsFirst)c
 document.getElementById('btnClass').addEventListener('click',()=>openClassSel(false));
 
 // ================= Inicio: cuenta y sala =================
-// Si el juego se abre desde el servidor, usa cuentas y salas reales (modo online).
-// Si no, funciona igual que antes, guardando todo en este navegador.
-const ACC_KEY='valle-cuentas-v1',SES_KEY='valle-sesion-v1',TOKEN_KEY='valle-token-v1';
+// Con Firebase configurado (versión publicada en Vercel): cuentas, cofres y multijugador en vivo.
+// Sin Firebase (por ejemplo, la vista previa): todo funciona igual pero se guarda en este navegador.
+const ACC_KEY='valle-cuentas-v1',SES_KEY='valle-sesion-v1';
 const startEl=document.getElementById('start'),startBody=document.getElementById('startBody');
 let account=null,room=null,startTab='login',startMsg='',online=false,startReady=false,busy=false;
+let fbAuth=null,fdb=null,serverOffset=0;
+const nowServer=()=>Date.now()+serverOffset;
 function lsGet(k){try{return localStorage.getItem(k)||'';}catch(_){return '';}}
 function lsSet(k,v){try{if(v==null)localStorage.removeItem(k);else localStorage.setItem(k,v);}catch(_){}}
 function loadAccounts(){try{return JSON.parse(localStorage.getItem(ACC_KEY)||'{}')||{};}catch(_){return {};}}
@@ -4294,26 +4313,65 @@ const validEmail=e=>/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e);
 const ROOM_CHARS='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function newRoomCode(){let c='';for(let i=0;i<6;i++)c+=ROOM_CHARS[Math.floor(Math.random()*ROOM_CHARS.length)];return c;}
 function seedFromCode(code){let h=2166136261;for(const ch of code){h^=ch.charCodeAt(0);h=Math.imul(h,16777619);}return (h>>>0)%99999+1;}
-async function detectServer(){
-  if(!/^https?:$/.test(location.protocol))return false;
-  try{const ctl=new AbortController();setTimeout(()=>ctl.abort(),2500);const r=await fetch('/api/estado',{signal:ctl.signal,cache:'no-store'});if(!r.ok)return false;const j=await r.json();return !!j.ok;}catch(_){return false;}
+function initFirebase(){
+  const cfg=window.VALLE_FIREBASE;
+  try{
+    if(!window.firebase||!cfg||!cfg.apiKey||/PEGAR/.test(cfg.apiKey)||!cfg.databaseURL)return false;
+    if(!firebase.apps.length)firebase.initializeApp(cfg);
+    fbAuth=firebase.auth();fdb=firebase.database();
+    fdb.ref('.info/serverTimeOffset').on('value',s=>{serverOffset=s.val()||0;});
+    return true;
+  }catch(e){console.warn('Firebase no disponible',e);return false;}
 }
-async function api(method,path,body){
-  let r;
-  try{r=await fetch(path,{method,cache:'no-store',headers:Object.assign({'Content-Type':'application/json'},account&&account.token?{Authorization:'Bearer '+account.token}:{}),body:body?JSON.stringify(body):undefined});}
-  catch(_){throw new Error('No se pudo conectar con el servidor. Revisá que esté encendido.');}
-  let j={};try{j=await r.json();}catch(_){}
-  if(!r.ok)throw new Error(j.error||'El servidor respondió con un error.');
-  return j;
+const TS=()=>firebase.database.ServerValue.TIMESTAMP;
+const AUTH_ERR={
+  'auth/email-already-in-use':'Ya existe una cuenta con ese correo. Iniciá sesión.',
+  'auth/invalid-email':'Escribí un correo válido.',
+  'auth/weak-password':'La contraseña tiene que tener al menos 6 caracteres.',
+  'auth/wrong-password':'El correo o la contraseña no son correctos.',
+  'auth/user-not-found':'El correo o la contraseña no son correctos.',
+  'auth/invalid-credential':'El correo o la contraseña no son correctos.',
+  'auth/invalid-login-credentials':'El correo o la contraseña no son correctos.',
+  'auth/too-many-requests':'Demasiados intentos. Esperá unos minutos.',
+  'auth/popup-closed-by-user':'Cerraste la ventana de Google antes de terminar.',
+  'auth/popup-blocked':'El navegador bloqueó la ventana de Google. Permití las ventanas emergentes.',
+  'auth/unauthorized-domain':'Falta autorizar esta página en Firebase: Authentication → Configuración → Dominios autorizados.',
+  'auth/operation-not-allowed':'Ese método de inicio de sesión no está activado en Firebase (Authentication → Método de acceso).',
+  'auth/network-request-failed':'No hay conexión. Revisá internet.',
+};
+const authMsg=e=>AUTH_ERR[e&&e.code]||('No se pudo entrar: '+((e&&e.message)||'error desconocido'));
+async function loadProfile(u){
+  let p=null;try{p=(await fdb.ref('jugadores/'+u.uid).get()).val();}catch(_){}
+  account={uid:u.uid,email:u.email||'',name:(p&&p.nombre)||'',rooms:(p&&p.salas)||[],needsName:!(p&&p.nombre)};
+  if(account.name)draft.player=account.name;
 }
-const fromServer=j=>({email:j.email,name:j.nombre,rooms:j.salas||[],token:j.token});
 function el(t,c,x){const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e;}
 function field(id,label,type,ph,val){const f=el('div','field');const l=el('label',null,label);l.htmlFor=id;const i=el('input');i.type=type;i.id=id;if(ph)i.placeholder=ph;if(val)i.value=val;i.autocomplete=type==='password'?(startTab==='login'?'current-password':'new-password'):type==='email'?'email':'nickname';f.append(l,i);return [f,i];}
 function renderStart(){
   startBody.textContent='';
-  if(!startReady){startBody.appendChild(el('p','hint','Buscando el servidor del juego…'));return;}
-  startBody.appendChild(el('div','net-pill '+(online?'on':'off'),online?'Modo online: cuentas y salas en el servidor':'Modo sin conexión: todo se guarda en este navegador'));
+  if(!startReady){startBody.appendChild(el('p','hint','Preparando el juego…'));return;}
+  startBody.appendChild(el('div','net-pill '+(online?'on':'off'),online?'Online: jugás con tus amigos en vivo':'Sin conexión: todo se guarda en este navegador'));
+  // falta elegir nombre (primera vez con Google)
+  if(account&&account.needsName){
+    const form=el('form','start-form');form.noValidate=true;
+    form.appendChild(el('p','hint','Primera vez que entrás. Elegí cómo te van a ver los demás.'));
+    const [fn,i]=field('stName','Nombre de jugador','text','Ej: Kevo');i.maxLength=14;form.appendChild(fn);
+    const err=el('div','err');err.setAttribute('role','alert');const go=el('button','primary','Guardar y seguir');go.type='submit';form.append(err,go);
+    form.addEventListener('submit',async ev=>{
+      ev.preventDefault();const name=i.value.trim();
+      if(name.length<2){err.textContent='Tu nombre tiene que tener al menos 2 letras.';return;}
+      go.disabled=true;
+      try{await fdb.ref('jugadores/'+account.uid).update({nombre:name,email:account.email,creado:TS()});account.name=name;account.needsName=false;draft.player=name;renderStart();}
+      catch(e){err.textContent='No se pudo guardar el nombre. Revisá las reglas de la base de datos.';go.disabled=false;}
+    });
+    startBody.appendChild(form);setTimeout(()=>i.focus(),50);return;
+  }
   if(!account){
+    if(online){
+      const g=el('button','google','Entrar con Google');
+      g.addEventListener('click',async()=>{if(busy)return;busy=true;startMsg='';try{await fbAuth.signInWithPopup(new firebase.auth.GoogleAuthProvider());await loadProfile(fbAuth.currentUser);}catch(e){startMsg=authMsg(e);}busy=false;renderStart();});
+      startBody.append(g,el('div','or','o con correo y contraseña'));
+    }
     const tabs=el('div','seg tabs');
     for(const [id,lab] of [['login','Iniciar sesión'],['register','Crear cuenta']]){const b=el('button',null,lab);b.setAttribute('aria-pressed',String(startTab===id));b.addEventListener('click',()=>{startTab=id;startMsg='';renderStart();});tabs.appendChild(b);}
     startBody.appendChild(tabs);
@@ -4323,63 +4381,67 @@ function renderStart(){
     form.append(fe,fp2);
     let iname=null;
     if(startTab==='register'){const [fn,i]=field('stName','Nombre de jugador','text','Ej: Kevo');i.maxLength=14;iname=i;form.appendChild(fn);}
-    form.appendChild(el('p','hint',online?'Tu cuenta se guarda en el servidor del juego. Usá una contraseña propia del juego, no la de tu Gmail.':'Tu cuenta se guarda solo en este navegador. No uses la contraseña de tu Gmail: creá una nueva solo para el juego.'));
+    form.appendChild(el('p','hint',online?'Usá una contraseña propia del juego, no la de tu Gmail. Si entrás con Google no necesitás contraseña.':'Tu cuenta se guarda solo en este navegador. No uses la contraseña de tu Gmail.'));
     const err=el('div','err',startMsg);err.setAttribute('role','alert');
     const go=el('button','primary',startTab==='login'?'Entrar':'Crear cuenta');go.type='submit';
     form.append(err,go);
     form.addEventListener('submit',async ev=>{
       ev.preventDefault();if(busy)return;
-      const email=ie.value.trim().toLowerCase(),pass=ip.value;
-      const fail=m=>{startMsg=m;err.textContent=m;busy=false;go.disabled=false;};
+      const email=ie.value.trim().toLowerCase(),pass=ip.value,label=go.textContent;
+      const fail=m=>{startMsg=m;err.textContent=m;busy=false;go.disabled=false;go.textContent=label;};
       if(!validEmail(email))return fail('Escribí un correo válido, por ejemplo nombre@gmail.com.');
       if(pass.length<6)return fail('La contraseña tiene que tener al menos 6 caracteres.');
       const name=iname?(iname.value||'').trim():'';
       if(iname&&name.length<2)return fail('Tu nombre de jugador tiene que tener al menos 2 letras.');
       busy=true;go.disabled=true;go.textContent='Un momento…';
       if(online){
-        try{const j=await api('POST',startTab==='register'?'/api/registro':'/api/login',{email,password:pass,nombre:name});account=fromServer(j);lsSet(TOKEN_KEY,account.token);}
-        catch(e){go.textContent=startTab==='login'?'Entrar':'Crear cuenta';return fail(e.message);}
+        try{
+          if(startTab==='register'){const c=await fbAuth.createUserWithEmailAndPassword(email,pass);await fdb.ref('jugadores/'+c.user.uid).set({nombre:name,email,creado:TS(),salas:[]});}
+          else await fbAuth.signInWithEmailAndPassword(email,pass);
+          await loadProfile(fbAuth.currentUser);
+        }catch(e){return fail(authMsg(e));}
       }else{
         const accs=loadAccounts();
         if(startTab==='register'){
-          if(accs[email]){go.textContent='Crear cuenta';return fail('Ya hay una cuenta con ese correo en este navegador. Iniciá sesión.');}
+          if(accs[email])return fail('Ya hay una cuenta con ese correo en este navegador. Iniciá sesión.');
           const salt=newRoomCode()+Date.now();
           accs[email]={name,salt,hash:await hashPass(pass,salt),rooms:[]};
-          if(!saveAccounts(accs)){go.textContent='Crear cuenta';return fail('Este navegador no deja guardar datos. Probá fuera del modo incógnito.');}
+          if(!saveAccounts(accs))return fail('Este navegador no deja guardar datos. Probá fuera del modo incógnito.');
           account={email,...accs[email]};
         }else{
           const a=accs[email];
-          if(!a){go.textContent='Entrar';return fail('No hay ninguna cuenta con ese correo en este navegador. Creala en la otra pestaña.');}
-          if(await hashPass(pass,a.salt)!==a.hash){go.textContent='Entrar';return fail('La contraseña no es correcta.');}
+          if(!a)return fail('No hay ninguna cuenta con ese correo en este navegador. Creala en la otra pestaña.');
+          if(await hashPass(pass,a.salt)!==a.hash)return fail('La contraseña no es correcta.');
           account={email,...a};
         }
         lsSet(SES_KEY,email);
       }
       lsSet('valle-ultimo-correo',email);
-      busy=false;startMsg='';draft.player=account.name;renderStart();
+      busy=false;startMsg='';if(account&&account.name)draft.player=account.name;renderStart();
     });
     startBody.appendChild(form);
+    if(startMsg&&online&&!form.contains(err))startBody.appendChild(el('div','err',startMsg));
     setTimeout(()=>{(ie.value?ip:ie).focus();},50);
     return;
   }
   const who=el('div','who-row');
   who.append(el('span',null,'Jugás como '),el('b',null,account.name),el('small',null,account.email));
   const out=el('button','link','Cerrar sesión');
-  out.addEventListener('click',async()=>{if(online){try{await api('POST','/api/salir');}catch(_){}lsSet(TOKEN_KEY,null);}else lsSet(SES_KEY,null);disconnect();account=null;startTab='login';renderStart();});
+  out.addEventListener('click',async()=>{disconnect();if(online){try{await fbAuth.signOut();}catch(_){}}else lsSet(SES_KEY,null);account=null;startTab='login';renderStart();});
   who.appendChild(out);startBody.appendChild(who);
   const opts=el('div','room-opts'),gerr=el('div','err');gerr.setAttribute('role','alert');
   const run=async fn=>{if(busy)return;busy=true;gerr.textContent='';try{await fn();}catch(e){gerr.textContent=e.message;}busy=false;};
   const card=(title,desc,btnLabel,fn,extra)=>{const c=el('div','room-card');c.append(el('h3',null,title),el('p','hint',desc));if(extra)c.appendChild(extra);const b=el('button',null,btnLabel);b.addEventListener('click',()=>run(fn));c.appendChild(b);opts.appendChild(c);return c;};
-  card('Sala pública',online?'Todos los jugadores del servidor, en el mismo mapa.':'Un mapa nuevo al azar.','Jugar',async()=>{
-    if(online){const j=await api('GET','/api/salas/PUBLICA');enterRoom('PUBLICA',j.seed);}else enterRoom(null);
+  card('Sala pública',online?'Todos los jugadores, en el mismo mapa.':'Un mapa nuevo al azar.','Jugar',async()=>{
+    if(online){const info=await roomInfo('PUBLICA',true);enterRoom('PUBLICA',info.seed);}else enterRoom(null);
   });
   card('Crear sala privada',online?'Te damos un código. Solo entra quien lo tenga, y juegan juntos.':'Te damos un código. Quien entre con ese código juega en tu mismo mapa.','Crear sala',async()=>{
-    if(online){const j=await api('POST','/api/salas');enterRoom(j.codigo,j.seed,true);}else enterRoom(newRoomCode(),null,true);
+    if(online){const {code,seed}=await createRoom();enterRoom(code,seed,true);}else enterRoom(newRoomCode(),null,true);
   });
   const jf=el('div','join');const ji=el('input');ji.type='text';ji.id='stRoom';ji.placeholder='Código';ji.maxLength=6;ji.setAttribute('aria-label','Código de sala');
   ji.addEventListener('input',()=>{ji.value=ji.value.toUpperCase().replace(/[^A-Z0-9]/g,'');});
   jf.appendChild(ji);
-  const joinCode=async c=>{if(c.length!==6)throw new Error('El código tiene 6 caracteres.');if(online){const j=await api('GET','/api/salas/'+c);enterRoom(c,j.seed);}else enterRoom(c);};
+  const joinCode=async c=>{if(c.length!==6)throw new Error('El código tiene 6 caracteres.');if(online){const info=await roomInfo(c,false);enterRoom(c,info.seed);}else enterRoom(c);};
   card('Unirse a una sala','Escribí el código de 6 caracteres que te pasaron.','Unirse',()=>joinCode(ji.value.trim()),jf);
   startBody.append(opts,gerr);
   if(account.rooms&&account.rooms.length){
@@ -4387,15 +4449,36 @@ function renderStart(){
     for(const c of account.rooms){const b=el('button','code',c);b.addEventListener('click',()=>run(()=>joinCode(c)));rec.appendChild(b);}
     startBody.appendChild(rec);
   }
-  if(!online)startBody.appendChild(el('p','hint','Para jugar con otras personas en vivo, abrí el juego desde la dirección de tu servidor.'));
+  if(!online)startBody.appendChild(el('p','hint','Para jugar con otras personas en vivo, abrí el juego desde su página publicada.'));
+}
+async function roomInfo(code,createIfMissing){
+  const ref=fdb.ref('salas/'+code+'/info');
+  let v;try{v=(await ref.get()).val();}catch(e){throw new Error('No se pudo conectar con la base de datos.');}
+  if(v)return v;
+  if(!createIfMissing)throw new Error('No existe ninguna sala con ese código.');
+  const r=await ref.transaction(cur=>cur||{publica:true,seed:1+Math.floor(Math.random()*99999),creada:Date.now()});
+  return r.snapshot.val();
+}
+async function createRoom(){
+  for(let i=0;i<5;i++){
+    const code=newRoomCode(),seed=seedFromCode(code);
+    const r=await fdb.ref('salas/'+code+'/info').transaction(cur=>cur?undefined:{duenio:account.uid,seed,creada:Date.now()});
+    if(r.committed)return {code,seed};
+  }
+  throw new Error('No se pudo crear la sala. Probá de nuevo.');
+}
+function rememberRoom(code){
+  if(!code||code==='PUBLICA')return;
+  account.rooms=[code,...(account.rooms||[]).filter(c=>c!==code)].slice(0,5);
+  if(online)fdb.ref('jugadores/'+account.uid+'/salas').set(account.rooms).catch(()=>{});
+  else{const accs=loadAccounts(),a=accs[account.email];if(a){a.rooms=account.rooms;saveAccounts(accs);}}
 }
 function enterRoom(code,serverSeed,created){
   room=code;
   if(serverSeed)seed=serverSeed;
   else if(code)seed=seedFromCode(code);
   else seed=Math.floor(Math.random()*99999)+1;
-  if(!online&&code){const accs=loadAccounts(),a=accs[account.email];if(a){a.rooms=[code,...(a.rooms||[]).filter(c=>c!==code)].slice(0,5);saveAccounts(accs);account.rooms=a.rooms;}}
-  if(online&&code&&code!=='PUBLICA')account.rooms=[code,...(account.rooms||[]).filter(c=>c!==code)].slice(0,5);
+  rememberRoom(code);
   startEl.hidden=true;
   firstLoad=true;generate();
   if(online)connect(code);
@@ -4423,14 +4506,14 @@ function openStart(){
 }
 async function bootStart(){
   startEl.hidden=false;renderStart();
-  online=await detectServer();
+  online=initFirebase();
   if(online){
-    const tok=lsGet(TOKEN_KEY);
-    if(tok){account={token:tok};try{account=fromServer(await api('GET','/api/yo'));}catch(_){account=null;lsSet(TOKEN_KEY,null);}}
+    await new Promise(res=>{let done=false;const fin=()=>{if(!done){done=true;res();}};setTimeout(fin,6000);
+      const un=fbAuth.onAuthStateChanged(async u=>{un();if(u){try{await loadProfile(u);}catch(_){}}fin();});});
   }else{
     const e=lsGet(SES_KEY),a=e&&loadAccounts()[e];if(a)account={email:e,...a};
   }
-  if(account)draft.player=account.name;
+  if(account&&account.name)draft.player=account.name;
   startReady=true;renderStart();
   document.getElementById('chat').hidden=!online;
 }
@@ -4441,7 +4524,7 @@ const chestKey=()=>'valle-cofre-'+(account?account.email:'');
 async function loadChest(){
   if(!account)return;
   let c=null;
-  if(online){try{c=(await api('GET','/api/cofre')).cofre;}catch(_){}}
+  if(online){try{c=(await fdb.ref('cofres/'+account.uid).get()).val();}catch(_){}}
   else{try{c=JSON.parse(localStorage.getItem(chestKey())||'null');}catch(_){}}
   if(!c)return;
   chest.wood=c.wood||0;chest.stone=c.stone||0;chest.ore=c.ore||0;chest.weapon=c.weapon||0;chest.armor=c.armor||0;chest.items=(c.items||[]).filter(i=>ITEMS[i]);
@@ -4452,68 +4535,102 @@ function saveChest(){
   clearTimeout(chestSaveT);
   chestSaveT=setTimeout(()=>{
     const c={wood:chest.wood,stone:chest.stone,ore:chest.ore,weapon:chest.weapon,armor:chest.armor,items:chest.items};
-    if(online)api('PUT','/api/cofre',{cofre:c}).catch(()=>banner('No se pudo guardar el cofre','info','Revisá la conexión'));
+    if(online)fdb.ref('cofres/'+account.uid).set(c).catch(()=>banner('No se pudo guardar el cofre','info','Revisá la conexión'));
     else{try{localStorage.setItem(chestKey(),JSON.stringify(c));}catch(_){}}
   },400);
 }
 
-// ================= Multijugador =================
-let ws=null,myId=null,wantRoom=null,reconnectT=0,netSendT=0,lastHitBy=null;
+// ================= Multijugador (Firebase Realtime Database) =================
+let roomRef=null,meRef=null,myId=null,wantRoom=null,netSendT=0,lastHitBy=null,netRefs=[],lastChatT=0;
 const remotes=new Map();
 function connect(code){
-  if(ws){wantRoom=null;try{ws.close();}catch(_){}ws=null;}
-  clearRemotes();wantRoom=code;netStatus='Conectando…';updateRoomTag();
-  const sock=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/juego?token='+encodeURIComponent(account.token)+'&sala='+encodeURIComponent(code));
-  ws=sock;
-  sock.onmessage=e=>{let m;try{m=JSON.parse(e.data);}catch(_){return;}onNet(m);};
-  sock.onclose=()=>{if(ws!==sock)return;ws=null;myId=null;clearRemotes();if(wantRoom===code){netStatus='Reconectando…';reconnectT=3;updateRoomTag();}};
+  disconnect();
+  wantRoom=code;netStatus='Conectando…';updateRoomTag();
+  roomRef=fdb.ref('salas/'+code);
+  meRef=roomRef.child('presencia/'+account.uid);
+  meRef.onDisconnect().remove();
+  const joinTs=nowServer();
+  const pres=roomRef.child('presencia');let presReady=false;
+  const onPres=s=>{if(s.key===account.uid)return;const v=s.val();if(!v)return;if(nowServer()-(v.ts||0)>20000)return;onNet({t:'estados',l:[Object.assign({},v,{id:s.key})]});return v;};
+  pres.on('child_added',s=>{const v=onPres(s);if(presReady&&v)onNet({t:'entra',nombre:v.n});});
+  pres.on('child_changed',onPres);
+  pres.on('child_removed',s=>{const v=s.val()||{};if(s.key!==account.uid)onNet({t:'sale',id:s.key,nombre:v.n||'Alguien'});});
+  pres.once('value',()=>{presReady=true;});
+  const ev=roomRef.child('eventos').orderByChild('ts').startAt(joinTs);
+  ev.on('child_added',s=>{const m=s.val();if(!m||(m.id===account.uid&&m.t!=='baja'))return;onNet(m);});
+  const hits=roomRef.child('golpes/'+account.uid);
+  hits.on('child_added',s=>{const m=s.val();s.ref.remove().catch(()=>{});if(!m||(m.ts||0)<joinTs-3000)return;onNet({t:'golpe',de:m.de,nombre:m.nombre,dmg:m.dmg});});
+  const conn=fdb.ref('.info/connected');
+  const onConn=s=>{if(s.val()){netStatus='';meRef.onDisconnect().remove();}else netStatus='Reconectando…';updateRoomTag();};
+  conn.on('value',onConn);
+  netRefs=[[pres,'child_added'],[pres,'child_changed'],[pres,'child_removed'],[ev,'child_added'],[hits,'child_added'],[conn,'value',onConn]];
+  // limpieza de eventos viejos
+  roomRef.child('eventos').orderByChild('ts').endAt(joinTs-120000).limitToFirst(100).once('value',s=>{s.forEach(c=>{c.ref.remove().catch(()=>{});});});
+  onNet({t:'hola',id:account.uid});
 }
-function disconnect(){wantRoom=null;if(ws){const s=ws;ws=null;try{s.close();}catch(_){}}myId=null;clearRemotes();netStatus='';}
-function netSend(o){if(ws&&ws.readyState===1)ws.send(JSON.stringify(o));}
+function disconnect(){
+  wantRoom=null;
+  for(const [ref,evt,fn] of netRefs){try{fn?ref.off(evt,fn):ref.off(evt);}catch(_){}}
+  netRefs=[];
+  if(meRef){try{meRef.remove();meRef.onDisconnect().cancel();}catch(_){}}
+  meRef=null;roomRef=null;myId=null;clearRemotes();netStatus='';
+}
+const clip=(s,n)=>String(s||'').replace(/[\u0000-\u001f<>]/g,'').trim().slice(0,n);
+function netSend(o){
+  if(!roomRef||!account)return;
+  const name=account.name;
+  try{
+    if(o.t==='estado'){const st=Object.assign({},o);delete st.t;st.n=name;st.ts=TS();if(!st.k)delete st.k;meRef.set(st);}
+    else if(o.t==='disparo')roomRef.child('eventos').push({t:'disparo',id:account.uid,x:o.x,z:o.z,dx:o.dx,dz:o.dz,ts:TS()});
+    else if(o.t==='golpe')roomRef.child('golpes/'+o.a).push({de:account.uid,nombre:name,dmg:Math.max(0,Math.min(600,Math.round(o.dmg))),ts:TS()});
+    else if(o.t==='muerte'){const by=o.por&&remotes.get(o.por);const m={t:'baja',id:account.uid,victima:name,ts:TS()};if(by)m.asesino=by.name;roomRef.child('eventos').push(m);}
+    else if(o.t==='chat'){const now=Date.now();if(now-lastChatT<700)return;lastChatT=now;const txt=clip(o.txt,140);if(txt)roomRef.child('eventos').push({t:'chat',id:account.uid,nombre:name,txt,ts:TS()});}
+  }catch(e){console.warn('No se pudo enviar',e);}
+}
 function clearRemotes(){for(const r of remotes.values())removeRemote(r);remotes.clear();}
 function removeRemote(r){if(world)world.remove(r.m);disposeAll(r.m);removeTag(r.tag);if(lockTarget===r)lockTarget=null;remotes.delete(r.id);}
 function upsertRemote(e){
+  if(!world)return;
   let r=remotes.get(e.id);
   const cls=CLASSES[e.c]?e.c:'mage';
   if(r&&r.cls!==cls){removeRemote(r);r=null;}
   if(!r){
     const {body,parts}=makeHumanoid(cls),g=new THREE.Group();g.add(body);g.userData.body=body;g.userData.parts=parts;
     const ring=new THREE.Mesh(new THREE.RingGeometry(.75,.88,32),new THREE.MeshBasicMaterial({color:0xff7a3a,transparent:true,opacity:.75,depthWrite:false}));ring.rotation.x=-Math.PI/2;ring.position.y=.08;g.add(ring);
-    g.position.set(e.x,e.y,e.z);world.add(g);
-    r={id:e.id,kind:'player',m:g,cls,name:e.n,x:e.x,z:e.z,py:e.y,rot:e.r,r:.5,y:3.15,hidden:false,walkT:0,stunT:0,clanKey:'?'};
-    r.tag=addTag(r,e.n,'enemy',true);remotes.set(e.id,r);updateRoomTag();
+    g.position.set(e.x||0,e.y||0,e.z||0);world.add(g);
+    r={id:e.id,kind:'player',m:g,cls,name:e.n||'Jugador',x:e.x||0,z:e.z||0,py:e.y||0,rot:e.r||0,r:.5,y:3.15,hidden:false,walkT:0,stunT:0,clanKey:'?'};
+    r.tag=addTag(r,r.name,'enemy',true);remotes.set(e.id,r);updateRoomTag();
   }
-  r.tx=e.x;r.tz=e.z;r.tpy=e.y;r.trot=e.r;r.hp=e.h;r.max=e.m;r.anim=e.a;r.alive=e.v;r.o=!!e.o;r.seen=performance.now();
+  r.tx=+e.x||0;r.tz=+e.z||0;r.tpy=+e.y||0;r.trot=+e.r||0;r.hp=+e.h||0;r.max=+e.m||1;r.anim=e.a;r.alive=!!e.v;r.o=!!e.o;r.seen=performance.now();
   const ck=e.k?e.k.tag+e.k.color+e.k.logo:'';
-  if(ck!==r.clanKey){r.clanKey=ck;if(e.k&&LOGOS[e.k.logo])r.tag.label.innerHTML=tagHtml(e.k,e.n);else r.tag.label.textContent=e.n;}
+  if(ck!==r.clanKey){r.clanKey=ck;if(e.k&&LOGOS[e.k.logo]&&/^#[0-9a-f]{6}$/i.test(e.k.color))r.tag.label.innerHTML=tagHtml({tag:clip(e.k.tag,4),color:e.k.color,logo:e.k.logo},r.name);else r.tag.label.textContent=r.name;}
 }
 function onNet(m){
-  if(m.t==='hola'){myId=m.id;netStatus='';reconnectT=0;updateRoomTag();chatLine(null,'Conectado a la sala. Apretá Enter para escribir en el chat.');}
+  if(m.t==='hola'){myId=m.id;netStatus='';updateRoomTag();chatLine(null,'Conectado a la sala. Apretá Enter para escribir en el chat.');}
   else if(m.t==='estados'){for(const e of m.l)if(e.id!==myId)upsertRemote(e);}
   else if(m.t==='entra'){chatLine(null,m.nombre+' entró a la sala');}
   else if(m.t==='sale'){const r=remotes.get(m.id);if(r)removeRemote(r);chatLine(null,m.nombre+' salió de la sala');updateRoomTag();}
-  else if(m.t==='disparo'){fireBolt(m.x,m.z,m.dx,m.dz,0,'remote',texRed,1,null,{range:14,speed:30});}
-  else if(m.t==='golpe'){if(!heroDead&&!inVillage(hero.position.x,hero.position.z)){lastHitBy=m.de;hurtHero(m.dmg);}}
-  else if(m.t==='baja'){chatLine(null,m.asesino?m.asesino+' eliminó a '+m.victima:m.victima+' fue eliminado');if(m.asesino===(account&&account.name))banner('Eliminaste a '+m.victima,'pvp','Jugador de la sala');}
+  else if(m.t==='disparo'){fireBolt(+m.x,+m.z,+m.dx,+m.dz,0,'remote',texRed,1,null,{range:14,speed:30});}
+  else if(m.t==='golpe'){if(!heroDead&&!inVillage(hero.position.x,hero.position.z)){lastHitBy=m.de;hurtHero(+m.dmg||0);}}
+  else if(m.t==='baja'){chatLine(null,m.asesino?m.asesino+' eliminó a '+m.victima:m.victima+' fue eliminado');if(m.asesino&&m.asesino===(account&&account.name))banner('Eliminaste a '+m.victima,'pvp','Jugador de la sala');}
   else if(m.t==='chat'){chatLine(m.nombre,m.txt);}
-  else if(m.t==='aviso'){banner(m.txt,'info');wantRoom=null;}
 }
 function damageRemote(r,amt,big){
   if(!r.alive)return;
+  if(inVillage(r.x,r.z)||inVillage(hero.position.x,hero.position.z))return;
   floatText(String(amt),r.x,2.4,r.z,big?'big':'');combatT=0;healFromDamage(amt);
   netSend({t:'golpe',a:r.id,dmg:amt});
 }
 function updNet(dt){
   if(!online)return;
-  if(!ws&&wantRoom){reconnectT-=dt;if(reconnectT<=0){reconnectT=5;connect(wantRoom);}}
   netSendT-=dt;
-  if(netSendT<=0&&ws&&ws.readyState===1&&world){
-    netSendT=.1;
+  if(netSendT<=0&&roomRef&&world){
+    netSendT=.125;
     netSend({t:'estado',x:+hero.position.x.toFixed(2),z:+hero.position.z.toFixed(2),y:+hero.position.y.toFixed(2),r:+hero.rotation.y.toFixed(2),c:heroClass,a:heroState,h:Math.round(hp),m:maxHp(),v:!heroDead,o:!!(heroBush&&revealT<=0),k:clan?{tag:clan.tag,color:clan.color,logo:clan.logo}:null});
   }
-  const now=performance.now(),k=Math.min(1,dt*12);
+  const now=performance.now(),k=Math.min(1,dt*10);
   for(const r of [...remotes.values()]){
-    if(now-r.seen>4000){removeRemote(r);updateRoomTag();continue;}
+    if(now-r.seen>6000){removeRemote(r);updateRoomTag();continue;}
     const jump=Math.hypot(r.tx-r.x,r.tz-r.z)>15;
     const ox=r.x,oz=r.z;
     r.x=jump?r.tx:r.x+(r.tx-r.x)*k;r.z=jump?r.tz:r.z+(r.tz-r.z)*k;r.py+=(r.tpy-r.py)*k;
