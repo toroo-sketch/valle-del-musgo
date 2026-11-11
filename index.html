@@ -126,6 +126,7 @@ button:disabled{opacity:.45;cursor:not-allowed;border-color:var(--line);color:va
 #loading{position:fixed;inset:0;display:grid;place-items:center;background:var(--night);z-index:9}
 #loading div{font-family:var(--display);font-size:24px;color:var(--gold);letter-spacing:.06em;text-align:center}
 #loading small{display:block;margin-top:8px;font-family:var(--ui);font-size:14px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase}
+.kp-mode{display:grid;gap:6px;font-size:14px;color:var(--muted);letter-spacing:.04em}
 .keys-panel{position:fixed;z-index:8;top:calc(env(safe-area-inset-top,0px) + 62px);right:calc(env(safe-area-inset-right,0px) + 16px);width:min(340px,calc(100vw - 32px));max-height:calc(100% - 150px);overflow:auto;padding:14px 14px 12px;display:grid;gap:12px;background:rgba(12,17,11,.96)}
 .kp-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .kp-head h2{margin:0;font-family:var(--display);font-weight:400;font-size:20px;color:var(--gold);letter-spacing:.04em}
@@ -339,6 +340,9 @@ button.danger{border-color:var(--danger);color:var(--danger)}
 
 <div class="keys-panel panel" id="keysPanel" role="dialog" aria-label="Teclas" hidden>
   <div class="kp-head"><h2>Teclas</h2><button id="kpClose">Cerrar</button></div>
+  <div class="kp-mode"><span>Cómo se mueve el personaje</span>
+    <div class="seg" id="kpMove"><button data-m="keys">Teclado (WASD)</button><button data-m="click">Clic derecho (como LoL)</button></div>
+  </div>
   <div class="kp-list" id="kpList"></div>
   <p class="kp-note">Tocá una tecla de la lista y apretá la nueva. Si ya la usaba otra acción, se intercambian. Esc cancela. Las flechas mueven la cámara.</p>
   <div class="kp-foot"><span id="kpMsg"></span><button id="kpReset">Restablecer</button></div>
@@ -1809,6 +1813,7 @@ const deathEl=document.getElementById('death'),deathTxt=document.getElementById(
 function killHero(){
   netSend({t:'muerte',por:lastHitBy});lastHitBy=null;sfx('death');
   if(shadows.length)dismissShadows();rapid=null;cancelBuild();cancelDemolish();
+  clickDest=null;pendingGather=null;
   hp=0;heroDead=true;deadT=5;gather=null;dashing=null;lockTarget=null;hero.position.y=0;spinT=0;stealthT=0;shieldHp=0;buffT=0;
   hero.visible=false;
   burst(hero.position.x,1.2,hero.position.z,texEmber,26,6);
@@ -2002,9 +2007,30 @@ function updClassFx(dt,now){
     }
   }
 }
+// movimiento con clic (como en el LoL)
+let clickMove=(()=>{try{return localStorage.getItem('valle-mov')==='click';}catch(_){return false;}})();
+let clickDest=null,pendingGather=null,lastTap=false;
+const moveMarker=new THREE.Mesh(new THREE.RingGeometry(.35,.55,28),new THREE.MeshBasicMaterial({color:0x9be37f,transparent:true,opacity:0,depthWrite:false,fog:false}));
+moveMarker.rotation.x=-Math.PI/2;moveMarker.position.y=.12;scene.add(moveMarker);let markerT=0;
+function moveTo(x,z){
+  if(heroDead||fp)return;
+  let best=null,bd=1.6;for(const e of allEnemies()){if(!e.alive)continue;const d=Math.hypot(e.x-x,e.z-z)-e.r;if(d<bd){bd=d;best=e;}}
+  if(best){lockTarget=best;rangePulse=.4;return;}
+  clickDest={x,z};pendingGather=nearestGatherable(x,z,.8);gather=null;
+  moveMarker.position.x=x;moveMarker.position.z=z;markerT=1;
+}
+function updMoveMarker(dt){markerT=Math.max(0,markerT-dt*1.6);moveMarker.material.opacity=markerT*.9;moveMarker.scale.setScalar(.6+markerT*.6);}
 function moveInput(){
   let kx=(held('right')?1:0)-(held('left')?1:0)+joyVec.x,kz=(held('down')?1:0)-(held('up')?1:0)+joyVec.z;
-  const l=Math.hypot(kx,kz);if(l<.15)return null;
+  const l=Math.hypot(kx,kz);
+  if(l>=.15){clickDest=null;pendingGather=null;}
+  else if(clickDest&&!fp){
+    if(pendingGather&&nodeAlive(pendingGather)&&inReach(pendingGather)){gather=pendingGather;gatherT=0;clickDest=null;pendingGather=null;return null;}
+    const dx=clickDest.x-hero.position.x,dz=clickDest.z-hero.position.z,d=Math.hypot(dx,dz);
+    if(d<.25){clickDest=null;return null;}
+    return {x:dx/d,z:dz/d,l:1};
+  }
+  if(l<.15)return null;
   let x=kx/l,z=kz/l;
   if(fp){const c=Math.cos(yaw),s=Math.sin(yaw),wx=-c*x+s*(-z),wz=s*x+c*(-z);x=wx;z=wz;}
   return {x,z,l:Math.min(1,l)};
@@ -2121,6 +2147,7 @@ function stepHero(dt){
     let nx=x+ux*step,nz=z+uz*step;
     if(blocked(nx,nz)){if(!blocked(nx,z))nz=z;else if(!blocked(x,nz))nx=x;else{nx=x;nz=z;}}
     hero.position.x=nx;hero.position.z=nz;
+    if(clickDest&&nx===x&&nz===z){clickDest=null;pendingGather=null;}
     if(castAnim<=0){let da=Math.atan2(ux,uz)-hero.rotation.y;da=Math.atan2(Math.sin(da),Math.cos(da));hero.rotation.y+=da*Math.min(1,dt*14);}
     heroState=(nx!==x||nz!==z)?'run':'idle';
     if(heroState==='run')walkT+=dt*CL().speed*1.2*speedMult()*mi.l;
@@ -2202,8 +2229,9 @@ function clickWorld(p){
     if(Math.hypot(p.x-d.exitX,p.z-d.exitZ)<2.6){nearExit()===d?exitDungeon(d):tooFar('salir');return;}
   }
   const n=nearestGatherable(p.x,p.z,.8);
-  if(n){if(inReach(n)){gather=n;gatherT=0;}else tooFar('recolectar');return;}
+  if(n){if(inReach(n)){gather=n;gatherT=0;}else if(clickMove&&lastTap)moveTo(p.x,p.z);else tooFar('recolectar');return;}
   lockTarget=null;
+  if(clickMove&&lastTap)moveTo(p.x,p.z);
 }
 
 // ================= Ventanas: comercio y cofre =================
@@ -2449,6 +2477,7 @@ canvas.addEventListener('pointerdown',e=>{
   }
   if((building||demolishing)&&e.button===0){modeConfirm();return;}
   if((building||demolishing)&&e.button===2){modeCancel();return;}
+  if(clickMove&&e.button===2){const g=groundAt(e);if(g)moveTo(g.x,g.z);ptr={id:e.pointerId,rmove:true};return;}
   if(e.button===1){ptr={id:e.pointerId,anchor:groundAt(e)};return;}
   const g=groundAt(e);if(g)clickWorld(g);
 });
@@ -2458,6 +2487,7 @@ canvas.addEventListener('pointermove',e=>{
     lookBy(dx,dy,.005);lookDrag.x=e.clientX;lookDrag.y=e.clientY;return;
   }
   if(e.pointerType==='mouse'&&!fp){mouseClient={clientX:e.clientX,clientY:e.clientY};aimFromMouse=true;}
+  if(ptr&&ptr.rmove&&e.pointerId===ptr.id&&(e.buttons&2)){const g=groundAt(e);if(g&&clickDest){clickDest.x=g.x;clickDest.z=g.z;}return;}
   if(joy&&e.pointerId===joy.id){
     const dx=e.clientX-joy.sx,dy=e.clientY-joy.sy,l=Math.hypot(dx,dy);
     if(!joy.active&&l>12){joy.active=true;joyEl.hidden=false;}
@@ -2470,7 +2500,7 @@ function endPointer(e){
   if(lookDrag&&e.pointerId===lookDrag.id){if(!lookDrag.moved&&document.pointerLockElement!==canvas)fpClick();lookDrag=null;return;}
   if(joy&&e.pointerId===joy.id){
     if(!joy.active&&(building||demolishing))modeConfirm();
-    else if(!joy.active&&!fp){const g=groundAt(e);if(g)clickWorld(g);}
+    else if(!joy.active&&!fp){const g=groundAt(e);if(g){lastTap=true;clickWorld(g);lastTap=false;}}
     joy=null;joyVec.x=joyVec.z=0;joyEl.hidden=true;joyKnob.style.transform='';
   }
   if(ptr&&e.pointerId===ptr.id)ptr=null;
@@ -2521,7 +2551,11 @@ function keyName(code){
 const actionOf=code=>{for(const a of ACTIONS)if(bind[a.id]===code)return a.id;return null;};
 const held=id=>keys.has(bind[id]);
 const keysPanel=document.getElementById('keysPanel'),kpList=document.getElementById('kpList'),kpMsg=document.getElementById('kpMsg'),btnKeys=document.getElementById('btnKeys');
+function paintMoveMode(){document.querySelectorAll('#kpMove button').forEach(b=>b.setAttribute('aria-pressed',String((b.dataset.m==='click')===clickMove)));}
+document.querySelectorAll('#kpMove button').forEach(b=>b.addEventListener('click',()=>{clickMove=b.dataset.m==='click';try{localStorage.setItem('valle-mov',clickMove?'click':'keys');}catch(_){}clickDest=null;paintMoveMode();renderHelp();b.blur();
+  banner(clickMove?'Movimiento con clic':'Movimiento con teclado','info',clickMove?'Clic derecho en el suelo para caminar. Mantenelo apretado para seguir el mouse. En el celular, tocá el suelo.':'Usá '+['up','left','down','right'].map(id=>keyName(bind[id])).join(' ')+' para moverte.');}));
 function renderKeys(){
+  paintMoveMode();
   kpList.textContent='';let g='';
   for(const a of ACTIONS){
     if(a.group!==g){g=a.group;const h=document.createElement('div');h.className='kp-group';h.textContent=g;kpList.appendChild(h);}
@@ -2543,7 +2577,7 @@ function renderHelp(){
   const mv=['up','left','down','right'].map(id=>keyName(bind[id])).join(' ');
   const ab=['q','w','e','r'].map(id=>keyName(bind[id])).join(' ');
   const items2=[
-    ['key',mv,'mover'],
+    clickMove?['key','Clic derecho','mover · '+mv+' también']:['key',mv,'mover'],
     ['key',ab,'ataques al enemigo más cercano'],
     ['key','Clic','elegir enemigo · usar'],
     ['key',keyName(bind.interact),'usar / recolectar'],
@@ -4716,7 +4750,7 @@ function loop(now){
     else targetRing.visible=false;
     rangePulse=Math.max(0,rangePulse-dt);
     rangeRing.material.opacity=.22+rangePulse*.6;rangeFill.material.opacity=.035+rangePulse*.08;
-    updAbilities(dt);updClassFx(dt,now);updShadows(dt);updBeasts(dt,now);updVillagers(dt);updNet(dt);updBushes(dt);updEnv(dt);updMusic(dt);updWar(dt);updCaves(dt);updBase(dt);updBuild();updDemolish();updFalling(dt);updJail(dt);updCamps(dt);updFruit(dt,now);clanSim(dt);updSlashes(dt);updZones(dt);updBots(dt);updDungeons(dt);updProjectiles(dt);updNovas(dt);updParticles(dt);updGhosts(dt);
+    updAbilities(dt);updClassFx(dt,now);updShadows(dt);updBeasts(dt,now);updVillagers(dt);updNet(dt);updBushes(dt);updMoveMarker(dt);updEnv(dt);updMusic(dt);updWar(dt);updCaves(dt);updBase(dt);updBuild();updDemolish();updFalling(dt);updJail(dt);updCamps(dt);updFruit(dt,now);clanSim(dt);updSlashes(dt);updZones(dt);updBots(dt);updDungeons(dt);updProjectiles(dt);updNovas(dt);updParticles(dt);updGhosts(dt);
     updDummies(dt,now);updNodes(dt,now);updBags(dt,now);updFloats(dt);updTags();
     updZone();updPrompt();
     if(waterMat)waterMat.uniforms.t.value=now/1000;
