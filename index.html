@@ -42,7 +42,16 @@ html,body{height:100%;margin:0;overflow:hidden;background:var(--night);color:var
 .inv svg{width:16px;height:16px}
 .gear{font-size:13px;color:var(--muted);letter-spacing:.04em;line-height:1.35}
 .gear b{color:var(--text);font-weight:600}
-.top-right{position:fixed;top:calc(env(safe-area-inset-top,0px) + 12px);right:calc(env(safe-area-inset-right,0px) + 16px);display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;max-width:50vw}
+.top-right{position:fixed;top:calc(env(safe-area-inset-top,0px) + 12px);right:calc(env(safe-area-inset-right,0px) + 16px);display:grid;justify-items:end;gap:8px;z-index:6}
+.gear-btn{position:relative;width:46px;height:46px;padding:0;display:grid;place-items:center;border-radius:50%;background:var(--panel)}
+.gear-btn svg{width:24px;height:24px;transition:transform .3s}
+.gear-btn[aria-expanded="true"] svg{transform:rotate(60deg)}
+.gear-btn i{position:absolute;top:6px;right:6px;width:9px;height:9px;border-radius:50%;background:var(--danger);box-shadow:0 0 0 2px var(--night)}
+.gear-menu{display:grid;gap:4px;padding:10px;width:220px;max-height:calc(100vh - 90px);overflow:auto}
+.gear-menu button{text-align:left;padding:9px 12px;width:100%}
+.gm-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);margin:6px 2px 0}
+.gm-title:first-child{margin-top:0}
+@media (prefers-reduced-motion:reduce){.gear-btn svg{transition:none}}
 button{font-family:var(--ui);font-size:14px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--text);padding:8px 14px;cursor:pointer;background:var(--panel);border:1px solid var(--line);transition:border-color .15s,color .15s}
 button:hover{border-color:var(--gold);color:var(--gold)}
 button:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
@@ -327,15 +336,21 @@ button.danger{border-color:var(--danger);color:var(--danger)}
 </div>
 
 <div class="top-right">
-  <button id="btnTalent">Talentos</button>
-  <button id="btnBase">Base</button>
-  <button id="btnClan">Clan</button>
-  <button id="btnClass">Personaje</button>
-  <button id="btnKeys" aria-expanded="false" aria-controls="keysPanel">Teclas</button>
-  <button id="btnView" aria-pressed="false">1ª persona</button>
-  <button id="btnLock" aria-pressed="true">Cámara fija</button>
-  <button id="btnSound">Sonido: todo</button>
-  <button id="btnNew">Cambiar sala</button>
+  <button id="btnGear" class="gear-btn" aria-label="Menú y configuración" aria-expanded="false" aria-controls="gearMenu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v2.6M12 18.9v2.6M4.6 4.6l1.9 1.9M17.5 17.5l1.9 1.9M2.5 12h2.6M18.9 12h2.6M4.6 19.4l1.9-1.9M17.5 6.5l1.9-1.9"/><circle cx="12" cy="12" r="6.6"/></svg><i id="gearDot" hidden></i></button>
+  <div id="gearMenu" class="gear-menu panel" hidden>
+    <div class="gm-title">Tu personaje</div>
+    <button id="btnClass">Personaje</button>
+    <button id="btnTalent">Talentos</button>
+    <button id="btnBase">Base</button>
+    <button id="btnClan">Clan</button>
+    <div class="gm-title">Configuración</div>
+    <button id="btnKeys" aria-expanded="false" aria-controls="keysPanel">Teclas y movimiento</button>
+    <button id="btnView" aria-pressed="false">1ª persona</button>
+    <button id="btnLock" aria-pressed="true">Cámara fija</button>
+    <button id="btnSound">Sonido: todo</button>
+    <div class="gm-title">Partida</div>
+    <button id="btnNew">Cambiar sala</button>
+  </div>
 </div>
 
 <div class="keys-panel panel" id="keysPanel" role="dialog" aria-label="Teclas" hidden>
@@ -2320,6 +2335,13 @@ function openModal(which){
 function closeModals(){tradeEl.hidden=true;chestEl.hidden=true;clanEl.hidden=true;baseEl.hidden=true;talentEl.hidden=true;}
 let chestOpenT=0;
 document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',closeModals));
+// menú de la tuerquita
+const gearBtn=document.getElementById('btnGear'),gearMenu=document.getElementById('gearMenu'),gearDot=document.getElementById('gearDot');
+function setGear(open){gearMenu.hidden=!open;gearBtn.setAttribute('aria-expanded',String(open));}
+gearBtn.addEventListener('click',e=>{e.stopPropagation();gearBtn.blur();setGear(gearMenu.hidden);});
+gearMenu.addEventListener('click',e=>{if(e.target.closest('button')&&!e.target.closest('#btnSound,#btnLock'))setGear(false);});
+document.addEventListener('pointerdown',e=>{if(!gearMenu.hidden&&!e.target.closest('.top-right'))setGear(false);});
+setInterval(()=>{const t=document.getElementById('btnTalent').textContent,c=document.getElementById('btnClan').textContent;gearDot.hidden=!(/\(/.test(t)||/\(/.test(c));},1000);
 document.getElementById('btnSound').addEventListener('click',e=>{e.currentTarget.blur();cycleSound();});
 
 // ================= HUD =================
@@ -2611,7 +2633,7 @@ window.addEventListener('keydown',e=>{
     if(e.code.startsWith('Arrow')){kpMsg.textContent='Las flechas quedan para la cámara';return;}
     assign(rebinding,e.code);return;
   }
-  if(e.code==='Escape'){if(modeCancel())return;if(!baseEl.hidden){baseEl.hidden=true;return;}if(!talentEl.hidden){talentEl.hidden=true;return;}if(!clanEl.hidden){clanEl.hidden=true;return;}if(!clsEl.hidden){if(!clsFirst)clsEl.hidden=true;return;}if(!tradeEl.hidden||!chestEl.hidden){closeModals();return;}if(!keysPanel.hidden){setPanel(false);return;}lockTarget=null;return;}
+  if(e.code==='Escape'){if(!gearMenu.hidden){setGear(false);return;}if(modeCancel())return;if(!baseEl.hidden){baseEl.hidden=true;return;}if(!talentEl.hidden){talentEl.hidden=true;return;}if(!clanEl.hidden){clanEl.hidden=true;return;}if(!clsEl.hidden){if(!clsFirst)clsEl.hidden=true;return;}if(!tradeEl.hidden||!chestEl.hidden){closeModals();return;}if(!keysPanel.hidden){setPanel(false);return;}lockTarget=null;return;}
   const act=actionOf(e.code);
   if(act||e.code.startsWith('Arrow'))e.preventDefault();
   if(act==='center')spaceHeld=true;
